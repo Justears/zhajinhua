@@ -26,6 +26,8 @@ function createServer(options = {}) {
   if (!fs.existsSync(cfgFile)) atomic(cfgFile, config);
   const rooms = new Map(), streams = new Set(), limits = new Map(), seen = new Map();
   const now = options.now || Date.now;
+  const startedAt = now();
+  const hostAwayFor = r => Math.max(0,now()-(seen.get(r.host) ?? startedAt));
   const secureCookie = options.secureCookie ?? process.env.COOKIE_SECURE === 'true';
   const sign = s => crypto.createHmac('sha256', config.secret).update(s).digest('hex');
   const safeEq = (a, b) => { const aa = Buffer.from(a), bb = Buffer.from(b); return aa.length === bb.length && crypto.timingSafeEqual(aa, bb); };
@@ -35,6 +37,7 @@ function createServer(options = {}) {
     const r = JSON.parse(fs.readFileSync(path.join(dataDir, f), 'utf8'));
     if (!r.code || !Array.isArray(r.seats) || !r.rules) throw new Error(`房间存档无效：${f}`);
     if (r.game?.phase === 'betting') { r.deadline = now() + r.turnSeconds * 1000; r.version++; atomic(fileFor(r.code), r); }
+    r.actionVersion ??= r.version;
     rooms.set(r.code, r);
   }
   function identity(req) {
@@ -70,8 +73,8 @@ function createServer(options = {}) {
     const me = ownSeat(r, id);
     if (!me) fail('你还没有加入这个房间', 403);
     return {
-      code: r.code, name: r.name, version: r.version, capacity: r.capacity, rules: r.rules,
-      turnSeconds: r.turnSeconds, deadline: r.deadline, serverTime: now(), you: me.id, isHost: r.host === id,
+      code: r.code, name: r.name, version: r.version, actionVersion: r.actionVersion ?? r.version, capacity: r.capacity, rules: r.rules,
+      turnSeconds: r.turnSeconds, deadline: r.deadline, serverTime: now(), you: me.id, isHost: r.host === id, canClaimHost: r.host !== id && hostAwayFor(r) >= 120000,
       seats: r.seats.map(s => ({id: s.id, name: s.name, isHost: s.owner === r.host, online: now() - (seen.get(s.owner) || 0) < 35000})),
       game: r.game ? engine.viewFor(r.game, me.id) : null,
       legal: r.game ? engine.legalMoves(r.game, me.id).filter(m => m.type !== 'next_round' || r.host === id) : [],
@@ -87,7 +90,8 @@ function createServer(options = {}) {
       } catch { s.res.end(); streams.delete(s); }
     }
   }
-  function commit(r) {
+  function commit(r, gameplay = true) {
+    r.actionVersion = (r.actionVersion ?? r.version) + (gameplay ? 1 : 0);
     r.version++;
     r.updatedAt = now();
     if (r.game) { r.game.log = r.game.log.slice(-300); r.game.rounds = r.game.rounds.slice(-50); }
@@ -127,7 +131,7 @@ function createServer(options = {}) {
         const content = fs.readFileSync(path.join(__dirname,'public',f));
         res.writeHead(200,{'Content-Type':({'.html':'text/html','.js':'text/javascript','.css':'text/css','.svg':'image/svg+xml'})[ext]+'; charset=utf-8','Cache-Control':'no-cache'}); res.end(content); return;
       }
-      if (req.method === 'GET' && url.pathname === '/health') { json(res,200,{ok:true,version:'1.0.0'}); return; }
+      if (req.method === 'GET' && url.pathname === '/health') { json(res,200,{ok:true,version:require('./package.json').version}); return; }
       if (!url.pathname.startsWith('/api/')) fail('页面不存在',404);
       if (req.method !== 'GET') {
         const origin = req.headers.origin;
@@ -152,12 +156,13 @@ function createServer(options = {}) {
         const name = clean(b.nickname); if(!name) fail('请填写昵称');
         const rules = {blind_play: b.blind !== false,special_235: b.special235 === true,base_bet:bounded(b.ante,2,100,10),start_chips:bounded(b.chips,100,100000,1000)};
         if (rules.base_bet % 2) fail('底注请用偶数，方便闷牌半价计算');
+        if (rules.start_chips <= rules.base_bet) fail('初始积分必须大于底注，才能在发牌后继续操作');
         rules.max_bet = rules.base_bet * 10;
         let code; do { code = Array.from({length:6},()=> 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[crypto.randomInt(32)]).join(''); } while(rooms.has(code));
         const r = {code,name:clean(b.name,32)||`${name}的牌桌`,host:id,seats:[{id:token(),owner:id,name}],capacity:bounded(b.capacity,2,8,8),rules,turnSeconds:bounded(b.turnSeconds,20,180,60),game:null,chat:[],version:0,deadline:null,createdAt:now(),receipts:[]};
         commit(r); json(res,201,payload(r,id)); return;
       }
-      const match = /^\/api\/rooms\/([A-Z0-9]{6})(?:\/(events|join|action|start|chat|leave|reset|close|kick))?$/.exec(url.pathname);
+      const match = /^\/api\/rooms\/([A-Z0-9]{6})(?:\/(events|join|action|start|chat|leave|reset|close|kick|claim-host))?$/.exec(url.pathname);
       if (!match) fail('接口不存在',404);
       const code = match[1], op = match[2];
       let old = rooms.get(code); if(!old) fail('房间不存在或已经关闭',404);
@@ -174,6 +179,8 @@ function createServer(options = {}) {
       const b = await body(req);
       // Re-read after awaiting request bytes; no await is allowed inside a mutation.
       old = rooms.get(code); if(!old) fail('房间已经关闭',404);
+      // Deadline is authoritative even between the one-second timer ticks.
+      if (op === 'action' && old.game?.phase === 'betting' && old.deadline <= now()) { tick(); old = rooms.get(code); }
       if (op==='join' && ownSeat(old,id)) {json(res,200,payload(old,id));return;}
       const r = structuredClone(old);
       if (op === 'join') {
@@ -187,11 +194,11 @@ function createServer(options = {}) {
       if (['start','reset','close','kick'].includes(op) && r.host!==id) fail('只有房主可以操作',403);
       if (op === 'chat') {
         rate('chat:'+id,20); const text=clean(b.text,200); if(!text) fail('消息不能为空');
-        r.chat.push({id:token(),name:me.name,text,time:now()});r.chat=r.chat.slice(-60);commit(r);json(res,200,payload(r,id));return;
+        r.chat.push({id:token(),name:me.name,text,time:now()});r.chat=r.chat.slice(-60);commit(r,false);json(res,200,payload(r,id));return;
       }
       if (!/^[a-zA-Z0-9_-]{8,100}$/.test(b.requestId||'')) fail('缺少操作编号，请刷新页面');
       if(r.receipts.some(x=>x.id===b.requestId&&x.owner===id)) {json(res,200,payload(r,id));return;}
-      if(b.version!==r.version) fail('牌局已经变化，请确认最新画面后重试',409);
+      if (b.actionVersion !== undefined ? b.actionVersion !== (r.actionVersion ?? r.version) : b.version !== r.version) fail('牌局已经变化，请确认最新画面后重试',409);
       if (op === 'close') { fs.unlinkSync(fileFor(code));rooms.delete(code);broadcast(code);json(res,200,{closed:true});return; }
       if (op === 'leave' || op === 'kick') {
         if(r.game) fail('请先让房主返回候场再调整座位');
@@ -201,6 +208,11 @@ function createServer(options = {}) {
         r.seats=r.seats.filter(s=>s.id!==target);
         if(!r.seats.length) { fs.unlinkSync(fileFor(code));rooms.delete(code);broadcast(code);json(res,200,{left:true});return; }
         if(r.host===id && op==='leave') r.host=r.seats[0].owner;
+      } else if (op === 'claim-host') {
+        if (r.host === id) fail('你已经是房主');
+        if (hostAwayFor(r) < 120000) fail('房主仍在线，或离线尚未满 2 分钟',409);
+        r.host=id;
+        r.chat.push({id:token(),name:'系统',text:me.name+' 接任房主',time:now()});r.chat=r.chat.slice(-60);
       } else if (op === 'reset') {
         if(r.game?.phase==='betting') fail('这一局尚未结束，请打完再返回候场');
         r.game=null;r.deadline=null;
@@ -229,6 +241,6 @@ function createServer(options = {}) {
 module.exports={createServer};
 if(require.main===module){
   const app=createServer(),port=Number(process.env.PORT||8080);
-  app.server.listen(port,'0.0.0.0',()=>console.log(`好友炸金花已启动：http://0.0.0.0:${port}`));
+  app.server.listen(port,'0.0.0.0',()=>console.log(`后周炸炸炸已启动：http://0.0.0.0:${port}`));
   for(const signal of ['SIGTERM','SIGINT'])process.on(signal,()=>app.shutdown().then(()=>process.exit(0)));
 }
