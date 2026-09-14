@@ -7,7 +7,7 @@ async function fixture(t){
   let base=await launch();
   t.after(async()=>{await app.shutdown();fs.rmSync(dir,{recursive:true,force:true});});
   function client(){return {cookie:'',async req(url,data,extra={}){const res=await fetch(base+url,{method:data===undefined?'GET':'POST',headers:{...(data===undefined?{}:{'content-type':'application/json'}),...(this.cookie?{cookie:this.cookie}:{}),...extra},body:data===undefined?undefined:JSON.stringify(data)});if(res.headers.get('set-cookie'))this.cookie=res.headers.get('set-cookie').split(';')[0];return {status:res.status,body:await res.json()};},async login(){const r=await this.req('/api/login',{password:'test-password-123'});assert.equal(r.status,200);return this;},async move(code,op,data={}){const state=await this.req('/api/rooms/'+code);return this.req(`/api/rooms/${code}/${op}`,{version:state.body.version,requestId:crypto.randomUUID(),...data});}};}
-  return {client,get app(){return app;},dir,advance(ms){clock+=ms;app.tick();},async restart(){await app.shutdown();base=await launch();}};
+  return {client,get app(){return app;},dir,advance(ms,runTick=true){clock+=ms;if(runTick)app.tick();},async restart(){await app.shutdown();base=await launch();}};
 }
 test('8 人完整 API 对局：权限、隐藏手牌、版本冲突、重复请求、重启续局',async t=>{
   const f=await fixture(t),users=[];for(let i=0;i<9;i++)users.push(await f.client().login());
@@ -60,3 +60,21 @@ test('8 人随机压力测试：500 局、卡牌唯一、积分守恒、无死�
     assert.equal(s.phase,'round_over');
   }
 });
+
+test('聊天不抢占操作版本，旧牌局动作仍拒绝，重复提交只执行一次',async t=>{
+ const f=await fixture(t),a=await f.client().login(),b=await f.client().login();
+ const made=await a.req('/api/rooms',{nickname:'甲'}),code=made.body.code;await b.req('/api/rooms/'+code+'/join',{nickname:'乙'});
+ const started=await a.move(code,'start');const actor=started.body.game.current===started.body.you?a:b;
+ const before=(await actor.req('/api/rooms/'+code)).body;
+ await a.req('/api/rooms/'+code+'/chat',{text:'这条消息不应打断出牌'});
+ const after=(await actor.req('/api/rooms/'+code)).body;assert.ok(after.version>before.version);assert.equal(after.actionVersion,before.actionVersion);
+ const move={version:before.version,actionVersion:before.actionVersion,requestId:crypto.randomUUID(),action:{type:'look'}};
+ const looked=await actor.req('/api/rooms/'+code+'/action',move);assert.equal(looked.status,200);
+ const duplicate=await actor.req('/api/rooms/'+code+'/action',move);assert.equal(duplicate.body.actionVersion,looked.body.actionVersion);
+ const stale=await actor.req('/api/rooms/'+code+'/action',{...move,requestId:crypto.randomUUID(),action:{type:'fold'}});assert.equal(stale.status,409);
+ await f.restart();assert.equal((await actor.req('/api/rooms/'+code)).body.actionVersion,looked.body.actionVersion);
+});
+test('建房拒绝发牌后所有人立即耗尽积分的配置',async t=>{const f=await fixture(t),a=await f.client().login();assert.equal((await a.req('/api/rooms',{nickname:'甲',ante:100,chips:100})).status,400);});
+
+test('截止时间在计时器触发前同样生效',async t=>{const f=await fixture(t),a=await f.client().login(),b=await f.client().login();const made=await a.req('/api/rooms',{nickname:'甲',turnSeconds:20}),code=made.body.code;await b.req('/api/rooms/'+code+'/join',{nickname:'乙'});const start=(await a.move(code,'start')).body;const actor=start.game.current===start.you?a:b;const snap=(await actor.req('/api/rooms/'+code)).body;f.advance(20001,false);const late=await actor.req('/api/rooms/'+code+'/action',{version:snap.version,actionVersion:snap.actionVersion,requestId:crypto.randomUUID(),action:{type:'look'}});assert.equal(late.status,409);assert.equal(late.body.error,'牌局已经变化，请确认最新画面后重试');assert.equal((await actor.req('/api/rooms/'+code)).body.game.phase,'round_over');});
+test('房主离线两分钟才能接任，接任后拥有开局权限',async t=>{const f=await fixture(t),a=await f.client().login(),b=await f.client().login();const made=await a.req('/api/rooms',{nickname:'甲'}),code=made.body.code;await b.req('/api/rooms/'+code+'/join',{nickname:'乙'});assert.equal((await b.move(code,'claim-host')).status,409);f.advance(120001);assert.equal((await b.req('/api/rooms/'+code)).body.canClaimHost,true);const claimed=await b.move(code,'claim-host');assert.equal(claimed.status,200);assert.equal(claimed.body.isHost,true);assert.equal((await a.move(code,'start')).status,403);assert.equal((await b.move(code,'start')).status,200);});
