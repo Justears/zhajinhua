@@ -1,0 +1,6 @@
+{
+  "name": "jinhua-friends", "version": "1.0.0", "private": true,
+  "description": "群晖好友炸金花：2–8 人、手机网页、无数据库",
+  "scripts": {"start": "node server.cjs", "test": "node --test test/*.test.cjs"},
+  "engines": {"node": ">=22"}, "license": "CC-BY-4.0"
+}

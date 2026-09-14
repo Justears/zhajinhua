@@ -1,0 +1,8 @@
+data
+test
+*.tar
+*.zip
+
+.git
+.env
+.env.*

@@ -1,0 +1,29 @@
+version: "3.8"
+# Alternative: uses the official Node runtime and mounts this ready-to-run application.
+services:
+  jinhua:
+    image: public.ecr.aws/docker/library/node:24-alpine
+    container_name: jinhua-friends
+    restart: unless-stopped
+    working_dir: /app
+    command: ["node", "server.cjs"]
+    ports: ["18780:8080"]
+    environment:
+      PORT: "8080"
+      DATA_DIR: /data
+      ROOM_PASSWORD: "${ROOM_PASSWORD:?Set ROOM_PASSWORD in .env first}"
+      COOKIE_SECURE: "false"
+      TZ: Asia/Shanghai
+    volumes:
+      - ./:/app:ro
+      - ./data:/data
+    read_only: true
+    tmpfs: ["/tmp:size=16m"]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    pids_limit: 64
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
