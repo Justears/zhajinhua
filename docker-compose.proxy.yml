@@ -1,3 +1,5 @@
+# Standalone alternative for DSM's built-in HTTPS reverse proxy.
+# Do not combine with docker-compose.yml: Compose may merge published ports.
 version: "3.8"
 services:
   jinhua:
@@ -5,21 +7,21 @@ services:
     container_name: jinhua-friends
     restart: unless-stopped
     ports:
-      - "${GAME_PORT:-18780}:8080"
+      - "127.0.0.1:${GAME_PORT:-18780}:8080"
     environment:
       PORT: "8080"
+      BIND_ADDRESS: "0.0.0.0"
       DATA_DIR: /data
       ROOM_PASSWORD: "${ROOM_PASSWORD:?Set ROOM_PASSWORD in .env first}"
-      COOKIE_SECURE: "false"
+      COOKIE_SECURE: "true"
+      PUBLIC_ORIGIN: "${PUBLIC_ORIGIN:?Set the public HTTPS game URL in .env first}"
       TZ: Asia/Shanghai
     volumes:
       - ./data:/data
     read_only: true
-    tmpfs:
-      - /tmp:size=16m
-    security_opt:
-      - no-new-privileges:true
+    tmpfs: ["/tmp:size=16m"]
     cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
     mem_limit: 256m
     cpus: 1.0
     pids_limit: 64
