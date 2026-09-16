@@ -1,13 +1,13 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path'),crypto=require('node:crypto');
 const {createServer}=require('../server.cjs'),engine=require('../engines/zjh.cjs');
-async function fixture(t){
+async function fixture(t, options={}){
   const dir=fs.mkdtempSync(path.join(os.tmpdir(),'jinhua-test-'));let clock=Date.now(),app;
-  async function launch(){app=createServer({dataDir:dir,password:'test-password-123',now:()=>clock});await new Promise(r=>app.server.listen(0,'127.0.0.1',r));return `http://127.0.0.1:${app.server.address().port}`;}
+  async function launch(){app=createServer({dataDir:dir,password:'test-password-123',now:()=>clock,...options});await new Promise(r=>app.server.listen(0,'127.0.0.1',r));return `http://127.0.0.1:${app.server.address().port}`;}
   let base=await launch();
   t.after(async()=>{await app.shutdown();fs.rmSync(dir,{recursive:true,force:true});});
   function client(){return {cookie:'',async req(url,data,extra={}){const res=await fetch(base+url,{method:data===undefined?'GET':'POST',headers:{...(data===undefined?{}:{'content-type':'application/json'}),...(this.cookie?{cookie:this.cookie}:{}),...extra},body:data===undefined?undefined:JSON.stringify(data)});if(res.headers.get('set-cookie'))this.cookie=res.headers.get('set-cookie').split(';')[0];return {status:res.status,body:await res.json()};},async login(){const r=await this.req('/api/login',{password:'test-password-123'});assert.equal(r.status,200);return this;},async move(code,op,data={}){const state=await this.req('/api/rooms/'+code);return this.req(`/api/rooms/${code}/${op}`,{version:state.body.version,requestId:crypto.randomUUID(),...data});}};}
-  return {client,get app(){return app;},dir,advance(ms,runTick=true){clock+=ms;if(runTick)app.tick();},async restart(){await app.shutdown();base=await launch();}};
+  return {client,get app(){return app;},get base(){return base;},dir,advance(ms,runTick=true){clock+=ms;if(runTick)app.tick();},async restart(changes={}){await app.shutdown();Object.assign(options,changes);base=await launch();}};
 }
 test('8 人完整 API 对局：权限、隐藏手牌、版本冲突、重复请求、重启续局',async t=>{
   const f=await fixture(t),users=[];for(let i=0;i<9;i++)users.push(await f.client().login());
