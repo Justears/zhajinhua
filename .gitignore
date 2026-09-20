@@ -8,4 +8,6 @@ data/*
 *.zip
 node_modules/
 *.log
+release-artifacts/
+/SHA256SUMS.txt
 .DS_Store
