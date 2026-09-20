@@ -79,3 +79,24 @@ test('监听设置支持本机地址，拒绝无效端口及地址',()=>{
   for(const PORT of ['0','65536','-1','abc','1.5'])assert.throws(()=>listenOptions({PORT}),/PORT/);
   assert.throws(()=>listenOptions({BIND_ADDRESS:'invalid'}),/BIND_ADDRESS/);
 });
+
+for(const operation of ['create','chat','join'])test(`请求上传中登录到期：${operation} 不得写入存档`,async t=>{
+  const f=await setup(t),cookie=await f.login();
+  const owner=await f.login(),room=(await f.req('/api/rooms',{nickname:'房主'},owner)).body;
+  if(operation==='chat')await f.req(`/api/rooms/${room.code}/join`,{nickname:'玩家'},cookie);
+  const before=fs.readFileSync(path.join(f.dir,`room-${room.code}.json`),'utf8');
+  f.advance(89*86400000);
+  const url=operation==='create'?'/api/rooms':`/api/rooms/${room.code}/${operation}`;
+  const firstBytes=new Promise(resolve=>f.app.server.once('request',req=>req.once('data',resolve)));
+  let request;
+  const response=new Promise((resolve,reject)=>{
+    request=require('node:http').request(f.base+url,{method:'POST',headers:{cookie,'content-type':'application/json'}},res=>{
+      let text='';res.on('data',part=>text+=part);res.on('end',()=>resolve({status:res.statusCode,body:JSON.parse(text)}));res.on('error',reject);
+    });request.on('error',reject);
+  });
+  t.after(()=>request.destroy());request.write('{"nickname":');await firstBytes;
+  f.advance(2*86400000);request.end('"新玩家","text":"过期消息"}');
+  assert.equal((await response).status,401);
+  assert.equal(f.app.rooms.size,1);
+  assert.equal(fs.readFileSync(path.join(f.dir,`room-${room.code}.json`),'utf8'),before);
+});

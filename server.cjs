@@ -92,6 +92,13 @@ function createServer(options = {}) {
     if (!value || Array.isArray(value) || typeof value !== 'object') fail('请求格式不正确');
     return value;
   }
+  async function authenticatedBody(req) {
+    const value = await body(req);
+    // Uploading a request can cross the session deadline. Check again at the
+    // mutation boundary, with no further await before applying the change.
+    if (!session(req)) fail('请重新输入入场密码',401);
+    return value;
+  }
   const ownSeat = (r, id) => r.seats.find(s => s.owner === id);
   function summary(r, id) {
     return {code: r.code, name: r.name, count: r.seats.length, capacity: r.capacity, phase: r.game?.phase || 'waiting', mine: !!ownSeat(r,id), round: r.game?.round || 0};
@@ -192,7 +199,7 @@ function createServer(options = {}) {
       if (url.pathname === '/api/rooms' && req.method === 'GET') { json(res,200,{rooms:[...rooms.values()].map(r=>summary(r,id)).sort((a,b)=>Number(b.mine)-Number(a.mine))}); return; }
       if (url.pathname === '/api/rooms' && req.method === 'POST') {
         rate('create:'+id,10);
-        const b = await body(req);
+        const b = await authenticatedBody(req);
         if (rooms.size >= 100) fail('房间已满，请先关闭不用的房间');
         if ([...rooms.values()].filter(r=>r.host===id).length >= 10) fail('你最多同时创建 10 个房间');
         const name = clean(b.nickname); if(!name) fail('请填写昵称');
@@ -219,7 +226,7 @@ function createServer(options = {}) {
       }
       if (req.method !== 'POST') fail('不支持此操作',405);
       rate('mutate:'+id,180);
-      const b = await body(req);
+      const b = await authenticatedBody(req);
       // Re-read after awaiting request bytes; no await is allowed inside a mutation.
       old = rooms.get(code); if(!old) fail('房间已经关闭',404);
       // Deadline is authoritative even between the one-second timer ticks.
