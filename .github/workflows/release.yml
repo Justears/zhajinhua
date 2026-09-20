@@ -85,7 +85,9 @@ jobs:
           gh release upload "$TAG" \
             "release-artifacts/houzhou-zhazhazha-$TAG-amd64.zip" \
             release-artifacts/SHA256SUMS.txt --clobber
-          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > release-artifacts/uploaded-release.json
+          RELEASE_ID=$(gh release view "$TAG" --json databaseId --jq .databaseId)
+          gh release edit "$TAG" --target "$GITHUB_SHA"
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > release-artifacts/uploaded-release.json
           node scripts/package-release.cjs --verify-upload
           gh release edit "$TAG" --draft=false --latest \
             --notes-file release-artifacts/release-notes.md
