@@ -1,1 +1,91 @@
+name: Test and publish Docker release
 
+on:
+  push:
+    branches: [main]
+    paths:
+      - package.json
+      - .github/workflows/release.yml
+      - scripts/package-release.cjs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Validate version and build image
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./package.json').version")
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          docker build --platform linux/amd64 --tag "jinhua-friends:$VERSION" .
+      - name: Run regression tests inside the image
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint node \
+            --mount "type=bind,src=$PWD/test,dst=/app/test,readonly" \
+            "jinhua-friends:$VERSION" --test 'test/*.test.cjs'
+      - name: Check hardened container startup and login
+        run: |
+          set -euo pipefail
+          docker volume create houzhou-ci-data
+          trap 'docker rm -f houzhou-ci 2>/dev/null || true; docker volume rm houzhou-ci-data 2>/dev/null || true' EXIT
+          docker run -d --name houzhou-ci --read-only --cap-drop ALL \
+            --security-opt no-new-privileges:true --tmpfs /tmp:size=16m \
+            --memory 256m --cpus 1 --pids-limit 64 \
+            --mount type=volume,src=houzhou-ci-data,dst=/data \
+            -p 127.0.0.1::8080 -e ROOM_PASSWORD=ci-disposable-only-123 \
+            "jinhua-friends:$VERSION"
+          for attempt in $(seq 1 20); do
+            if docker exec houzhou-ci node -e "fetch('http://127.0.0.1:8080/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"; then break; fi
+            sleep 1
+          done
+          docker exec houzhou-ci node -e "(async()=>{const r=await fetch('http://127.0.0.1:8080/api/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({password:'ci-disposable-only-123'})});if(r.status!==200||!r.headers.get('set-cookie'))throw Error('Login failed');console.log('Container health and login passed')})().catch(e=>{console.error(e.message);process.exit(1)})"
+          PORT=$(docker port houzhou-ci 8080/tcp)
+          curl --fail --silent --show-error "http://$PORT/health"
+      - name: Create offline installation package
+        run: |
+          set -euo pipefail
+          mkdir -p release-artifacts
+          docker save "jinhua-friends:$VERSION" -o release-artifacts/jinhua-amd64.tar
+          node scripts/package-release.cjs
+      - name: Publish verified assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="v$VERSION"
+          # Never overwrite a published release. A failed draft may be resumed.
+          if gh release view "$TAG" --json isDraft > release-artifacts/existing-release.json 2> release-artifacts/release-error.txt; then
+            node -e "if(!require('./release-artifacts/existing-release.json').isDraft)throw Error('Release is already published')"
+          else
+            if ! grep -qi 'release not found' release-artifacts/release-error.txt; then
+              cat release-artifacts/release-error.txt
+              exit 1
+            fi
+            gh release create "$TAG" --target "$GITHUB_SHA" --draft \
+              --title "后周炸炸炸 $TAG · 断线恢复与安全修复" \
+              --notes-file release-artifacts/release-notes.md
+          fi
+          gh release upload "$TAG" \
+            "release-artifacts/houzhou-zhazhazha-$TAG-amd64.zip" \
+            release-artifacts/SHA256SUMS.txt --clobber
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > release-artifacts/uploaded-release.json
+          node scripts/package-release.cjs --verify-upload
+          gh release edit "$TAG" --draft=false --latest \
+            --notes-file release-artifacts/release-notes.md
