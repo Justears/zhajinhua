@@ -2,6 +2,9 @@ data
 test
 *.tar
 *.zip
+release-artifacts
+.github
+scripts
 
 .git
 .env
