@@ -230,7 +230,11 @@ function createServer(options = {}) {
       // Re-read after awaiting request bytes; no await is allowed inside a mutation.
       old = rooms.get(code); if(!old) fail('房间已经关闭',404);
       // Deadline is authoritative even between the one-second timer ticks.
-      if (op === 'action' && old.game?.phase === 'betting' && old.deadline <= now()) { tick(); old = rooms.get(code); }
+      if (op === 'action' && old.game?.phase === 'betting' && old.deadline <= now()) {
+        tick(); old = rooms.get(code);
+        // Failed persistence must not give a late action another chance to win.
+        if (old.game?.phase === 'betting' && old.deadline <= now()) fail('超时结算尚未保存，请稍后重试',503);
+      }
       if (op==='join' && ownSeat(old,id)) {json(res,200,payload(old,id));return;}
       const r = structuredClone(old);
       if (op === 'join') {
