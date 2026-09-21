@@ -91,7 +91,7 @@ const ALL_CARDS = (() => {
 
 /** "S3" -> {id,suit,rank}；不合法返回 null */
 function parseCard(id) {
-  if (typeof id !== 'string' || id.length < 2) return null;
+  if (typeof id !== 'string' || !/^[SHDC](?:[3-9]|1[0-5])$/.test(id)) return null;
   const suit = id[0];
   if (SUITS.indexOf(suit) < 0) return null;
   const r = Number(id.slice(1));
@@ -413,6 +413,7 @@ function startRound(ctx) {
     p.out = false;
     p.bet = 0;
     p.acts = 0;
+    p.owesResponse = false;
   }
   s.pot = 0;
   s.currentBet = ante;
@@ -515,7 +516,7 @@ function settleRound(ctx, reason) {
 /**
  * 一次行动之后推进：
  *   只剩 1 人没弃 -> 收池；能行动的人 0 个 -> 摊牌；
- *   只剩 1 个能行动且他已经说过话 -> 摊牌（没人再跟得动了）；
+ *   只剩 1 个能行动、已说过话且无需回应后续加注 -> 摊牌；
  *   否则轮到 fromId 之后第一个没弃没全押的人。
  */
 function advanceTurn(ctx, fromId) {
@@ -524,10 +525,10 @@ function advanceTurn(ctx, fromId) {
   if (alive.length <= 1) { settleRound(ctx, 'last_standing'); return; }
   const actable = alive.filter((p) => !p.allin);
   if (!actable.length) { settleRound(ctx, 'showdown'); return; }
-  if (actable.length === 1 && actable[0].acts >= 1) { settleRound(ctx, 'showdown'); return; }
+  if (actable.length === 1 && actable[0].acts >= 1 && !actable[0].owesResponse) { settleRound(ctx, 'showdown'); return; }
   const nxt = nextMatching(s, fromId, (p) => !p.folded && !p.allin);
   if (nxt) { s.current = nxt.id; return; }
-  // 场上唯一能行动的就是 fromId 自己（且还没说过话）
+  // 场上唯一能行动的就是 fromId 自己（仍需行动）
   if (actable.length === 1 && actable[0].id === fromId) { s.current = fromId; return; }
   settleRound(ctx, 'showdown');
 }
@@ -592,7 +593,11 @@ function actBet(ctx, p, action) {
 
   const paid = payChips(s, p, amount);
   p.acts += 1;
-  if (kind === 'raise') s.currentBet = stake;
+  if (kind === 'raise') {
+    s.currentBet = stake;
+    for (const other of alivePlayers(s)) if (other.id !== p.id && !other.allin) other.owesResponse = true;
+  }
+  p.owesResponse = false;
   syncScores(s);
 
   if (kind === 'raise') {
@@ -626,6 +631,7 @@ function actCompare(ctx, p, action) {
   const cost = compareCost(s);
   const paid = payChips(s, p, cost);   // 闷牌者比牌也按明牌价付；不够就全押
   p.acts += 1;
+  p.owesResponse = false;
   const evA = evalHand(p.cards);
   const evB = evalHand(t.cards);
   const r = compareHands(evA, evB, s.rules);
@@ -746,7 +752,7 @@ function apply(state, playerId, action) {
   if (!state) throw new Error('缺少牌局状态');
   const act = (typeof action === 'string') ? { type: action } : (action || {});
   const type = act.type;
-  if (!type || !HANDLERS[type]) throw new Error(`未知动作：${type || '(空)'}`);
+  if (!type || !Object.hasOwn(HANDLERS, type)) throw new Error(`未知动作：${type || '(空)'}`);
   if (state.phase === 'game_over') throw new Error('整场已经结束了');
   if (!findPlayer(state, playerId)) throw new Error('查无此人');
 
@@ -795,6 +801,11 @@ function legalMoves(state, playerId) {
         type: 'bet', amount: pay, kind: pay === p.chips ? 'raise_allin' : 'raise',
         blind, stake: real
       });
+    }
+    // A valid all-in need not coincide with one of the preset raise amounts.
+    const allinStake = blind ? p.chips * 2 : p.chips;
+    if (allinStake > s.currentBet && allinStake <= cap && !out.some(m => m.type === 'bet' && m.amount === p.chips)) {
+      out.push({type:'bet', amount:p.chips, kind:'raise_allin', blind, stake:allinStake});
     }
   }
 
