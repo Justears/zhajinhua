@@ -79,7 +79,7 @@ jobs:
               exit 1
             fi
             gh release create "$TAG" --target "$GITHUB_SHA" --draft \
-              --title "后周炸炸炸 $TAG · 断线恢复与安全修复" \
+              --title "后周炸炸炸 $TAG · 界面体验与对局修复" \
               --notes-file release-artifacts/release-notes.md
           fi
           gh release upload "$TAG" \
