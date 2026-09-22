@@ -14,7 +14,7 @@ async function setup(t,settings={}) {
       });
     });request.on('error',reject);request.end(data===undefined?undefined:JSON.stringify(data));
   });}
-  return {req,dir,get base(){return base;},get app(){return app;},advance(ms){clock+=ms;app.tick();},async restart(next=password){await app.shutdown();password=next;await start();},async login(cookie=''){const r=await req('/api/login',{password},cookie);assert.equal(r.status,200);return r.cookie;}};
+  return {req,dir,get base(){return base;},get app(){return app;},elapse(ms){clock+=ms;},advance(ms){clock+=ms;app.tick();},async restart(next=password){await app.shutdown();password=next;await start();},async login(cookie=''){const r=await req('/api/login',{password},cookie);assert.equal(r.status,200);return r.cookie;}};
 }
 test('修改入场密码撤销旧登录，新密码验证后恢复原房间和座位',async t=>{
   const f=await setup(t),cookie=await f.login();
@@ -99,4 +99,22 @@ for(const operation of ['create','chat','join'])test(`请求上传中登录到�
   assert.equal((await response).status,401);
   assert.equal(f.app.rooms.size,1);
   assert.equal(fs.readFileSync(path.join(f.dir,`room-${room.code}.json`),'utf8'),before);
+});
+
+
+test('超时存档暂时写入失败时，迟到动作不能抢先改变牌局',async t=>{
+  const f=await setup(t),a=await f.login(),b=await f.login();
+  let r=(await f.req('/api/rooms',{nickname:'甲',turnSeconds:20},a)).body;
+  r=(await f.req('/api/rooms/'+r.code+'/join',{nickname:'乙'},b)).body;
+  r=(await f.req('/api/rooms/'+r.code+'/start',{version:r.version,requestId:crypto.randomUUID()},a)).body;
+  const current=r.game.current,cookie=current===r.you?a:b,original=fs.openSync;
+  let failures=0;
+  t.mock.method(fs,'openSync',function(file,...args){if(String(file)===path.join(f.dir,'room-'+r.code+'.json.tmp')&&failures++===0)throw Object.assign(new Error('temporary full disk'),{code:'ENOSPC'});return original.call(this,file,...args);});
+  t.mock.method(console,'error',()=>{});f.elapse(20001);
+  const late=await f.req('/api/rooms/'+r.code+'/action',{version:r.version,requestId:crypto.randomUUID(),action:{type:'look'}},cookie);
+  assert.equal(late.status,503);
+  const stored=JSON.parse(fs.readFileSync(path.join(f.dir,'room-'+r.code+'.json'),'utf8'));
+  assert.equal(stored.version,r.version);assert.equal(stored.game.players.find(p=>p.id===current).looked,false);
+  f.app.tick();
+  assert.equal(f.app.rooms.get(r.code).game.players.find(p=>p.id===current).folded,true);
 });

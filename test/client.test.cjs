@@ -2,8 +2,8 @@
 const test=require('node:test'),assert=require('node:assert/strict'),vm=require('node:vm'),fs=require('node:fs'),path=require('node:path');
 function client() {
   const elements=new Map();
-  function element(id){if(!elements.has(id))elements.set(id,{innerHTML:'',textContent:'',hidden:true,open:false,isConnected:true,className:'',close(){this.open=false;},showModal(){this.open=true;},querySelectorAll(){return[];}});return elements.get(id);}
-  const context=vm.createContext({document:{getElementById:element,addEventListener(){},hidden:false,title:''},window:{addEventListener(){}},location:{search:'',origin:'https://game.example'},history:{pushState(){}},localStorage:{getItem(){return'';},setItem(){}},setTimeout(){return 1;},clearTimeout(){},setInterval(){return 1;},clearInterval(){},URLSearchParams,AbortController,Date,console});
+  function element(id){if(!elements.has(id))elements.set(id,{innerHTML:'',textContent:'',hidden:true,open:false,isConnected:true,className:'',focus(){},setAttribute(name,value){this[name]=value;},removeAttribute(name){delete this[name];},querySelector(){return null;},close(){this.open=false;},showModal(){this.open=true;},querySelectorAll(){return[];}});return elements.get(id);}
+  const context=vm.createContext({document:{getElementById:element,addEventListener(){},hidden:false,title:''},window:{addEventListener(){},scrollTo(){}},location:{search:'',origin:'https://game.example'},history:{pushState(){}},localStorage:{getItem(){return'';},setItem(){}},setTimeout(){return 1;},clearTimeout(){},setInterval(){return 1;},clearInterval(){},URLSearchParams,AbortController,Date,console});
   // Unit-test the navigation controller without starting its automatic request.
   const source=fs.readFileSync(path.join(__dirname,'../public/app.js'),'utf8').replace(/route\(\);\s*$/,'');
   vm.runInContext(source,context);
@@ -125,4 +125,40 @@ test('重新连接成功后回到原房间，并恢复实时连接',async()=>{
 test('未加载完成的房间不能生成空邀请链接',()=>{
   const c=client();c.run(`mode='room';room=null;share();`);
   assert.equal(c.element('dialog').open,false);
+});
+
+
+test('切换到牌桌和登录页时回到顶部并把键盘焦点移入主要内容',()=>{
+  const c=client(),positions=[];let focused=0;c.element('app').focus=()=>focused++;c.context.window.scrollTo=p=>positions.push(p.top);
+  c.run('roomShell();login();');
+  assert.equal(focused,2);assert.deepEqual(positions,[0,0]);
+});
+
+test('显示密码可来回切换，登录提交按钮保持独立',async()=>{
+  const c=client(),submit={disabled:false,isConnected:true};
+  c.element('login-form').querySelector=selector=>{assert.equal(selector,'button[type=submit]');return submit;};
+  c.run('login();');c.element('password').type='password';
+  c.element('password-toggle').onclick();assert.equal(c.element('password').type,'text');assert.equal(c.element('password-toggle')['aria-pressed'],'true');
+  c.element('password-toggle').onclick();assert.equal(c.element('password').type,'password');
+  c.run('api=async()=>({ok:true});route=async()=>{};');
+  await c.element('login-form').onsubmit({preventDefault(){},target:c.element('login-form')});
+  assert.equal(submit.disabled,false);
+});
+
+test('操作返回登录过期时立即退出牌桌，不等待正在进行的轮询',async()=>{
+  const c=client();c.run("mode='room';activeCode='ABCDEF';room={code:'ABCDEF',version:1};roomLoad=navigationEpoch;renderActions=()=>{};api=async()=>{throw Object.assign(new Error('登录到期'),{status:401});};");
+  await c.run("mutate('action',{action:{type:'fold'}})");
+  assert.equal(c.run('mode'),'login');assert.equal(c.run('room'),null);
+});
+
+for(const variant of ['raise','compare'])test(variant+' 使用全部积分必须先明确确认全押',()=>{
+  const c=client();c.run("mode='room';activeCode='ABCDEF';room={code:'ABCDEF',version:1,you:'me',game:{phase:'betting',current:'me',players:[{id:'me',chips:20}]},legal:[{type:'bet',kind:'raise_allin',amount:20,stake:40},{type:'compare',target:'other',targetName:'好友',cost:20}]};var choice,confirm,played=0,choiceLabel='';choices=(title,actions,label,fn)=>{choiceLabel=label(actions[0]);choice=()=>fn(actions[0]);};confirmAction=(title,description,fn)=>{confirm=fn;};mutate=()=>played++;renderActions();");
+  c.element(variant).onclick();assert.match(c.run('choiceLabel'),/全押/);c.run('choice()');assert.equal(c.run('played'),0);c.run('confirm()');assert.equal(c.run('played'),1);
+});
+
+test('读取旧牌局动态时，轮询与新动态不会把阅读位置拉到底部',()=>{
+  const c=client(),logs=c.element('log-feed');logs.scrollTop=10;logs.scrollHeight=500;logs.clientHeight=100;
+  c.run("room={code:'ABCDEF',name:'测试桌',seats:[],capacity:2,rules:{start_chips:1000,base_bet:10},turnSeconds:60,chat:[],game:{phase:'betting',round:1,rules:{base_bet:10},players:[],log:[{text:'新动态'}],rounds:[]}};renderActions=()=>{};renderRoom();");
+  assert.equal(logs.scrollTop,10);
+  c.run('renderRoom()');assert.equal(logs.scrollTop,10);
 });

@@ -841,3 +841,40 @@ test('导出：CommonJS + 浏览器全局都挂得上', () => {
   assert.equal(cardsLabel(['S14', 'S15']), '♠A ♠2');
 });
 
+
+
+test('拒绝非标准牌号，防止同一张牌用不同拼写绕过重复检测',()=>{
+  for(const id of ['S03','S3.0','S+3','S 3','S3 ','S3e0'])assert.equal(engine.parseCard(id),null);
+  assert.throws(()=>evalHand(['S3','S03','S3.0']),/不认识/);
+  assert.equal(new Set(ALL_CARDS.map(c=>engine.parseCard(c).id)).size,52);
+});
+
+test('原型属性不能冒充合法动作',()=>{
+  const s=createGame({players:[{id:'a'},{id:'b'}],seed:'prototype'}),before=JSON.stringify(s);
+  for(const type of ['constructor','toString','valueOf','__proto__'])assert.throws(()=>apply(s,s.current,{type}),/未知动作/);
+  assert.equal(JSON.stringify(s),before);
+});
+
+
+for(const looked of [true,false])test('全押加注不必碰巧等于预设档位：'+(looked?'看牌':'闷牌'),()=>{
+  const s=mk({a:['S3','H4','D7'],b:['S4','H5','D8']},{chips:{a:47},looked:looked?['a']:[],rules:{max_bet:100}});
+  const move=legalMoves(s,'a').find(m=>m.kind==='raise_allin');assert.ok(move);assert.equal(move.amount,37);
+  const next=apply(s,'a',move).state;assert.equal(P(next,'a').chips,0);assert.equal(next.currentBet,looked?37:74);assert.equal(chipsTotal(next),s.totalChips);
+  const capped={...s,rules:{...s.rules,max_bet:20}};assert.ok(!legalMoves(capped,'a').some(m=>m.kind==='raise_allin'));
+});
+
+
+test('双人局全押加注后，对手必须有回应机会；看牌不算回应',()=>{
+  let s=mk({a:['S3','H4','D7'],b:['S4','H5','D8']},{chips:{a:50,b:100},looked:['a'],acts:1,rules:{max_bet:100}});
+  s=apply(s,'a',{type:'bet',amount:40}).state;assert.equal(s.phase,'betting');assert.equal(s.current,'b');
+  s=apply(s,'b',{type:'look'}).state;assert.equal(s.phase,'betting');assert.equal(s.current,'b');
+  const before=chipsTotal(s);s=apply(s,'b',{type:'bet',amount:40}).state;
+  assert.equal(s.phase,'round_over');assert.equal(s.lastResults.pot,100);assert.equal(chipsTotal(s),before);
+});
+
+test('多人局全押加注后，即使中间玩家弃牌，最后一人仍能回应',()=>{
+  let s=mk({a:['S3','H4','D7'],b:['S4','H5','D8'],c:['S5','H6','D9']},{chips:{a:50,b:100,c:100},looked:['a','b','c'],acts:1,rules:{max_bet:100}});
+  const before=chipsTotal(s);s=apply(s,'a',{type:'bet',amount:40}).state;s=apply(s,'b',{type:'fold'}).state;
+  assert.equal(s.phase,'betting');assert.equal(s.current,'c');
+  s=apply(s,'c',{type:'fold'}).state;assert.equal(s.phase,'round_over');assert.equal(s.lastResults.winners[0].playerId,'a');assert.equal(chipsTotal(s),before);
+});
