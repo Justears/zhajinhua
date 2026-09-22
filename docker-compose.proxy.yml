@@ -3,7 +3,7 @@
 version: "3.8"
 services:
   jinhua:
-    image: jinhua-friends:1.2.1
+    image: jinhua-friends:1.2.2
     container_name: jinhua-friends
     restart: unless-stopped
     ports:
