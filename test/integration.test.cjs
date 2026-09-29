@@ -78,3 +78,37 @@ test('建房拒绝发牌后所有人立即耗尽积分的配置',async t=>{const
 
 test('截止时间在计时器触发前同样生效',async t=>{const f=await fixture(t),a=await f.client().login(),b=await f.client().login();const made=await a.req('/api/rooms',{nickname:'甲',turnSeconds:20}),code=made.body.code;await b.req('/api/rooms/'+code+'/join',{nickname:'乙'});const start=(await a.move(code,'start')).body;const actor=start.game.current===start.you?a:b;const snap=(await actor.req('/api/rooms/'+code)).body;f.advance(20001,false);const late=await actor.req('/api/rooms/'+code+'/action',{version:snap.version,actionVersion:snap.actionVersion,requestId:crypto.randomUUID(),action:{type:'look'}});assert.equal(late.status,409);assert.equal(late.body.error,'牌局已经变化，请确认最新画面后重试');assert.equal((await actor.req('/api/rooms/'+code)).body.game.phase,'round_over');});
 test('房主离线两分钟才能接任，接任后拥有开局权限',async t=>{const f=await fixture(t),a=await f.client().login(),b=await f.client().login();const made=await a.req('/api/rooms',{nickname:'甲'}),code=made.body.code;await b.req('/api/rooms/'+code+'/join',{nickname:'乙'});assert.equal((await b.move(code,'claim-host')).status,409);f.advance(120001);assert.equal((await b.req('/api/rooms/'+code)).body.canClaimHost,true);const claimed=await b.move(code,'claim-host');assert.equal(claimed.status,200);assert.equal(claimed.body.isHost,true);assert.equal((await a.move(code,'start')).status,403);assert.equal((await b.move(code,'start')).status,200);});
+
+test('聊天响应丢失后重复发送只存一次，重启后仍有效且按玩家隔离',async t=>{
+  const f=await fixture(t),a=await f.client().login(),b=await f.client().login();
+  const code=(await a.req('/api/rooms',{nickname:'甲'})).body.code;
+  await b.req(`/api/rooms/${code}/join`,{nickname:'乙'});
+  const message={text:'今晚继续',requestId:crypto.randomUUID()},url=`/api/rooms/${code}/chat`;
+  const first=await a.req(url,message);assert.equal(first.status,200);
+  const bytes=fs.readFileSync(path.join(f.dir,`room-${code}.json`),'utf8');
+  const retry=await a.req(url,message);assert.equal(retry.status,200);
+  assert.equal(retry.body.chat.length,1);assert.equal(retry.body.version,first.body.version);
+  assert.equal(fs.readFileSync(path.join(f.dir,`room-${code}.json`),'utf8'),bytes);
+  await f.restart();assert.equal((await a.req(url,message)).body.chat.length,1);
+  assert.equal((await b.req(url,message)).body.chat.length,2,'另一位玩家可以发送相同内容');
+  assert.equal((await a.req(url,{...message,text:'不同内容'})).status,409);
+  assert.equal((await a.req(url,{...message,requestId:crypto.randomUUID()})).body.chat.length,3,'明确新消息仍可重复同一文本');
+  const legacy=await a.req(url,{text:'旧页面仍可发送'});assert.equal(legacy.status,200);
+  assert.equal(legacy.body.chatReceipts,undefined,'回执中的会话标识不能公开');
+  for(const requestId of ['',[],['abcdefgh'],{},123])assert.equal((await a.req(url,{text:'无效编号',requestId})).status,400);
+});
+
+test('聊天存档失败时不留下成功回执，恢复后同编号可正常补发',async t=>{
+  const f=await fixture(t),a=await f.client().login();
+  const code=(await a.req('/api/rooms',{nickname:'甲'})).body.code;
+  const file=path.join(f.dir,`room-${code}.json`),before=fs.readFileSync(file,'utf8');
+  const open=fs.openSync;let blocked=true;
+  t.mock.method(fs,'openSync',function(target,...args){if(String(target)===file+'.tmp'&&blocked){blocked=false;throw Object.assign(new Error('disk full'),{code:'ENOSPC'});}return open.call(this,target,...args);});
+  t.mock.method(console,'error',()=>{});
+  const url=`/api/rooms/${code}/chat`,message={text:'恢复后发送',requestId:crypto.randomUUID()};
+  assert.equal((await a.req(url,message)).status,500);
+  assert.equal(fs.readFileSync(file,'utf8'),before);
+  assert.equal(f.app.rooms.get(code).chat.length,0);
+  const restored=await a.req(url,message);assert.equal(restored.status,200);assert.equal(restored.body.chat.length,1);
+  const duplicate=await a.req(url,message);assert.equal(duplicate.body.chat.length,1);assert.equal(duplicate.body.version,restored.body.version);
+});

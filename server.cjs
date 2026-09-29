@@ -247,7 +247,19 @@ function createServer(options = {}) {
       const me = ownSeat(r,id); if(!me) fail('你还没有入座',403);
       if (['start','reset','close','kick'].includes(op) && r.host!==id) fail('只有房主可以操作',403);
       if (op === 'chat') {
-        rate('chat:'+id,20); const text=clean(b.text,200); if(!text) fail('消息不能为空');
+        const text=clean(b.text,200); if(!text) fail('消息不能为空');
+        // Optional for older cached clients. Receipts survive a restart and are
+        // private to the sending session; gameplay never evicts chat receipts.
+        if(b.requestId!==undefined){
+          if(typeof b.requestId!=='string'||!/^[a-zA-Z0-9_-]{8,100}$/.test(b.requestId)) fail('消息编号无效，请刷新页面');
+          const receipt=r.chatReceipts?.find(x=>x.id===b.requestId&&x.owner===id);
+          if(receipt){
+            if(receipt.text!==text) fail('消息内容已变化，请重新发送',409);
+            json(res,200,payload(r,id));return;
+          }
+        }
+        rate('chat:'+id,20);
+        if(b.requestId!==undefined) r.chatReceipts=[...(r.chatReceipts||[]),{id:b.requestId,owner:id,text}].slice(-100);
         r.chat.push({id:token(),name:me.name,text,time:now()});r.chat=r.chat.slice(-60);commit(r,false);json(res,200,payload(r,id));return;
       }
       if (!/^[a-zA-Z0-9_-]{8,100}$/.test(b.requestId||'')) fail('缺少操作编号，请刷新页面');

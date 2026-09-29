@@ -2,13 +2,52 @@
 const test=require('node:test'),assert=require('node:assert/strict'),vm=require('node:vm'),fs=require('node:fs'),path=require('node:path');
 function client() {
   const elements=new Map();
-  function element(id){if(!elements.has(id))elements.set(id,{innerHTML:'',textContent:'',hidden:true,open:false,isConnected:true,className:'',focus(){},setAttribute(name,value){this[name]=value;},removeAttribute(name){delete this[name];},querySelector(){return null;},close(){this.open=false;},showModal(){this.open=true;},querySelectorAll(){return[];}});return elements.get(id);}
+  function element(id){if(!elements.has(id))elements.set(id,{innerHTML:'',textContent:'',hidden:true,open:false,isConnected:true,className:'',focus(){},contains(){return false;},setAttribute(name,value){this[name]=value;},removeAttribute(name){delete this[name];},querySelector(){return null;},close(){this.open=false;},showModal(){this.open=true;},querySelectorAll(){return[];}});return elements.get(id);}
   const context=vm.createContext({document:{getElementById:element,addEventListener(){},hidden:false,title:''},window:{addEventListener(){},scrollTo(){}},location:{search:'',origin:'https://game.example'},history:{pushState(){}},localStorage:{getItem(){return'';},setItem(){}},setTimeout(){return 1;},clearTimeout(){},setInterval(){return 1;},clearInterval(){},URLSearchParams,AbortController,Date,console});
   // Unit-test the navigation controller without starting its automatic request.
   const source=fs.readFileSync(path.join(__dirname,'../public/app.js'),'utf8').replace(/route\(\);\s*$/,'');
   vm.runInContext(source,context);
   return {context,element,run:code=>vm.runInContext(code,context)};
 }
+for(const failure of [undefined,500,401])test(`聊天 ${failure||'网络中断'} 后手动重试复用编号，成功后再发相同文本使用新编号`,async()=>{
+  const c=client(),button={disabled:false,isConnected:true};c.element('chat-form').querySelector=()=>button;
+  c.run("roomShell();activeCode='ABCDEF';room={code:'ABCDEF',version:1};renderRoom=()=>{};var sent=[];api=async(url,data)=>{sent.push({...data});if(sent.length===1)throw Object.assign(new Error('发送失败'),{status:"+JSON.stringify(failure)+"});return {code:'ABCDEF',version:sent.length,serverTime:Date.now(),you:'me'};};");
+  c.element('chat-input').value='同一句招呼';
+  const submit=()=>c.element('chat-form').onsubmit({preventDefault(){},target:c.element('chat-form')});
+  await submit();
+  if(failure===401)c.run("activeCode='ABCDEF';roomShell();room={code:'ABCDEF',version:1};");
+  assert.equal(c.element('chat-input').value,'同一句招呼');
+  await submit();
+  c.element('chat-input').value='同一句招呼';await submit();
+  const ids=Array.from(c.run('sent.map(message=>message.requestId)'));
+  assert.match(ids[0]||'',/^[a-zA-Z0-9_-]{8,100}$/);
+  assert.equal(ids[1],ids[0],'人工重试未确认的消息应复用编号');
+  assert.notEqual(ids[2],ids[1],'已成功后再次发送相同内容应成为新消息');
+});
+
+test('同一句聊天在不同牌桌使用不同编号，返回原桌仍可重试原消息',async()=>{
+  const c=client(),button={disabled:false,isConnected:true};c.element('chat-form').querySelector=()=>button;
+  c.run("roomShell();activeCode='ABCDEF';room={code:'ABCDEF',version:1};renderRoom=()=>{};var sent=[];api=async(url,data)=>{sent.push({url,...data});if(sent.length===1)throw new Error('网络中断');return {code:url.split('/')[2],version:sent.length,serverTime:Date.now(),you:'me'};};");
+  const submit=()=>c.element('chat-form').onsubmit({preventDefault(){},target:c.element('chat-form')});
+  c.element('chat-input').value='你好';await submit();
+  c.run("stop();activeCode='GHIJKL';roomShell();room={code:'GHIJKL',version:1};");
+  c.element('chat-input').value='你好';await submit();
+  c.run("stop();activeCode='ABCDEF';roomShell();room={code:'ABCDEF',version:1};");
+  await submit();
+  const ids=Array.from(c.run('sent.map(message=>message.requestId)'));
+  assert.match(ids[0]||'',/^[a-zA-Z0-9_-]{8,100}$/);
+  assert.notEqual(ids[1],ids[0]);assert.equal(ids[2],ids[0]);
+});
+
+test('失败后改写聊天内容不会复用旧消息的编号',async()=>{
+  const c=client(),button={disabled:false,isConnected:true};c.element('chat-form').querySelector=()=>button;
+  c.run("roomShell();activeCode='ABCDEF';room={code:'ABCDEF',version:1};renderRoom=()=>{};var sent=[];api=async(url,data)=>{sent.push({...data});if(sent.length===1)throw new Error('网络中断');return {code:'ABCDEF',version:2,serverTime:Date.now(),you:'me'};};");
+  const submit=()=>c.element('chat-form').onsubmit({preventDefault(){},target:c.element('chat-form')});
+  c.element('chat-input').value='原消息';await submit();c.element('chat-input').value='修改过的消息';await submit();
+  const ids=Array.from(c.run('sent.map(message=>message.requestId)'));
+  assert.match(ids[0]||'',/^[a-zA-Z0-9_-]{8,100}$/);assert.notEqual(ids[1],ids[0]);
+});
+
 test('旧的同版本响应不能倒退倒计时或房主在线状态',()=>{
   const c=client();c.run(`mode='room';activeCode='ABCDEF';room={code:'ABCDEF',version:5,serverTime:200,you:'me',canClaimHost:true};renderRoom=()=>{};`);
   c.run(`receive({code:'ABCDEF',version:5,serverTime:100,you:'me',canClaimHost:false});`);
@@ -161,4 +200,72 @@ test('读取旧牌局动态时，轮询与新动态不会把阅读位置拉到�
   c.run("room={code:'ABCDEF',name:'测试桌',seats:[],capacity:2,rules:{start_chips:1000,base_bet:10},turnSeconds:60,chat:[],game:{phase:'betting',round:1,rules:{base_bet:10},players:[],log:[{text:'新动态'}],rounds:[]}};renderActions=()=>{};renderRoom();");
   assert.equal(logs.scrollTop,10);
   c.run('renderRoom()');assert.equal(logs.scrollTop,10);
+});
+
+test('大厅轮询相同座位状态时保留房间按钮，避免中断键盘选择',async()=>{
+  const c=client(),list=c.element('room-list');let replacements=0,html='';
+  Object.defineProperty(list,'innerHTML',{get(){return html;},set(value){replacements++;html=value.replace(/ disabled /g,' disabled="" ');}});
+  c.run("mode='lobby';api=async()=>({rooms:[{code:'ABCDEF',name:'朋友桌',mine:false,phase:'betting',count:2,capacity:2}]});");
+  await c.run('loadRooms()');await c.run('loadRooms()');
+  assert.equal(replacements,1,'原生浏览器会规范化 disabled 属性，不能因此反复重建按钮');
+});
+
+test('候场轮询不会重建开始发牌和移出按钮',()=>{
+  const c=client(),replacements={};
+  for(const id of ['seat-grid','table-center']){let html='';replacements[id]=0;Object.defineProperty(c.element(id),'innerHTML',{get(){return html;},set(value){replacements[id]++;html=value;}});}
+  c.run("room={code:'ABCDEF',name:'朋友桌',you:'me',isHost:true,seats:[{id:'me',name:'房主',online:true},{id:'friend',name:'朋友',online:true}],capacity:2,rules:{start_chips:1000,base_bet:10},turnSeconds:60,chat:[],game:null};renderRoom();renderRoom();");
+  assert.deepEqual(replacements,{'seat-grid':1,'table-center':1});
+});
+
+test('房间人数变化重绘列表后，键盘焦点仍留在原来选择的牌桌',async()=>{
+  const c=client(),list=c.element('room-list'),oldButton={dataset:{code:'ABCDEF'}},newButton={dataset:{code:'ABCDEF'},focus(){c.context.document.activeElement=this;}};
+  c.context.document.activeElement=oldButton;list.contains=element=>element===oldButton;
+  list.querySelectorAll=()=>[newButton];
+  Object.defineProperty(list,'innerHTML',{get(){return '';},set(){c.context.document.activeElement=null;}});
+  c.run("mode='lobby';api=async()=>({rooms:[{code:'ABCDEF',name:'朋友桌',mine:true,phase:'waiting',count:3,capacity:8}]});");
+  await c.run('loadRooms()');
+  assert.equal(c.context.document.activeElement,newButton);
+});
+
+test('缓存操作按钮仍更新禁用状态和最新牌局版本',()=>{
+  const c=client(),actions=c.element('actions'),call=c.element('call');let replacements=0,html='';
+  actions.querySelectorAll=()=>[call];
+  Object.defineProperty(actions,'innerHTML',{get(){return html;},set(value){replacements++;html=value;}});
+  c.run("room={code:'ABCDEF',version:1,actionVersion:1,you:'me',game:{phase:'betting',current:'me',players:[{id:'me',chips:100}]},legal:[{type:'bet',kind:'call',amount:10}]};var submittedVersion;mutate=(op,data,expected)=>submittedVersion=expected;renderActions();busy=true;renderActions();");
+  assert.equal(call.disabled,true);
+  c.run('busy=false;room.actionVersion=2;renderActions();');
+  assert.equal(call.disabled,false);call.onclick();
+  assert.equal(c.run('submittedVersion'),2);assert.equal(replacements,1);
+});
+
+test('复制邀请的成功提示位于模态框内，读屏用户无需离开弹窗',async()=>{
+  const c=client();c.context.navigator={clipboard:{async writeText(){}}};c.context.window.isSecureContext=true;
+  c.element('share-url').select=()=>{};
+  c.run("mode='room';activeCode='ABCDEF';room={code:'ABCDEF'};share();");
+  await c.element('copy').onclick();
+  assert.match(c.element('dialog-content').innerHTML,/id="share-status"[^>]*role="status"/);
+  assert.equal(c.element('share-status').textContent,'邀请链接已复制');
+  assert.equal(c.element('copy').textContent,'已复制');
+});
+
+test('复制邀请等待授权时不重复提交，关闭弹窗后不弹出迟到的失败提示',async()=>{
+  const c=client();let requests=0;const rejections=[];
+  c.context.navigator={clipboard:{writeText(){requests++;return new Promise((resolve,reject)=>{rejections.push(reject);});}}};c.context.window.isSecureContext=true;
+  c.element('share-url').select=()=>{};
+  c.run("mode='room';activeCode='ABCDEF';room={code:'ABCDEF'};share();");
+  const pending=c.element('copy').onclick(),duplicate=c.element('copy').onclick();
+  const count=requests;c.element('dialog').close();rejections.forEach(reject=>reject(new Error('denied')));await Promise.all([pending,duplicate]);
+  assert.equal(count,1);
+  assert.equal(c.element('toast').hidden,true);
+  assert.equal(c.element('copy').disabled,false);
+});
+
+test('HTTP访问无法自动复制时，在邀请弹窗内提示手动复制且可重试',async()=>{
+  const c=client();let selected=false;c.context.navigator={};c.context.window.isSecureContext=false;c.context.document.execCommand=()=>false;
+  c.element('share-url').select=()=>{selected=true;};
+  c.run("mode='room';activeCode='ABCDEF';room={code:'ABCDEF'};share();");
+  await c.element('copy').onclick();
+  assert.equal(selected,true);assert.equal(c.element('copy').disabled,false);
+  assert.equal(c.element('share-status').textContent,'链接已选中，请长按或手动复制');
+  assert.equal(c.element('toast').hidden,true);
 });
