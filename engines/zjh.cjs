@@ -378,7 +378,8 @@ function cloneResults(r) {
 }
 
 function logAdd(ctx, type, text) {
-  const entry = { seq: ctx.s.log.length + 1, t: ctx.s.seq, text, type };
+  // 服务端会裁剪旧日志，编号必须续接最后一条，不能依赖数组长度。
+  const entry = { seq: (ctx.s.log.at(-1)?.seq || 0) + 1, t: ctx.s.seq, text, type };
   ctx.s.log.push(entry);
   ctx.events.push(entry);
   return entry;

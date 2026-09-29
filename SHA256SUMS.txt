@@ -1,3 +1,1 @@
-# SHA256 checksums are generated for each release.
-# Download SHA256SUMS.txt beside the ZIP in the same GitHub Release.
-# The image checksum is inside that ZIP. Do not use an older build checksum.
+236f09f488d9a3c08be10947c19d1769c0027b1b2d4cc5354dfa8b699add4d87  jinhua-amd64.tar

@@ -731,6 +731,22 @@ test('apply 不改入参，events 就是本次新增的 log', () => {
   assert.deepEqual(r.events, r.state.log.slice(g.log.length));
 });
 
+test('日志截留后，新事件编号继续递增且不会与保留记录重复', () => {
+  let s = createGame({ players: ['a', 'b', 'c'].map(id => ({ id })), seed: 'trimmed-log' });
+  const initialLast = s.log.at(-1).seq;
+  // 服务端为限制存档大小会仅保留最后一段日志。
+  s.log = s.log.slice(-2);
+  let result = apply(s, s.current, { type: 'fold' });
+  assert.equal(result.events[0].seq, initialLast + 1);
+  s = result.state;
+  s.log = s.log.slice(-2);
+  const previousLast = s.log.at(-1).seq;
+  result = apply(s, s.current, { type: 'fold' });
+  assert.deepEqual(result.events.map(e => e.seq), result.events.map((_, i) => previousLast + i + 1));
+  assert.equal(new Set(result.state.log.map(e => e.seq)).size, result.state.log.length);
+  checkInvariants(result.state, '日志截留');
+});
+
 test('记账不变式：整局跑下来 Σchips + pot 恒等于初始总和', () => {
   let g = createGame({ players: ['a', 'b', 'c', 'd'].map((id) => ({ id, name: NAMES[id] })), seed: 'money' });
   assert.equal(g.totalChips, 4000);
