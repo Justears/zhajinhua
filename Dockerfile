@@ -1,4 +1,4 @@
-FROM public.ecr.aws/docker/library/node:24-alpine@sha256:333f6b3eca25980d5682c26207665b93c9417786b21760b2764d5821d9704c8a
+FROM docker.io/library/node:24-alpine@sha256:333f6b3eca25980d5682c26207665b93c9417786b21760b2764d5821d9704c8a
 WORKDIR /app
 COPY server.cjs package.json LICENSE-BISCA.txt THIRD_PARTY_NOTICES.md ./
 COPY engines ./engines
